@@ -16,48 +16,77 @@
 package io.lenses.streamreactor.connect.cloud.common.formats.writer
 
 import JsonFormatWriter._
-import LineSeparatorUtil.LineSeparatorBytes
+import io.lenses.streamreactor.connect.cloud.common.formats.writer.LineSeparatorUtil.LineSeparatorBytes
+import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodec
+import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodecName
+import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodecName.GZIP
+import io.lenses.streamreactor.connect.cloud.common.model.CompressionCodecName.UNCOMPRESSED
 import io.lenses.streamreactor.connect.cloud.common.sink.SinkError
+import io.lenses.streamreactor.connect.cloud.common.sink.conversion.ToJsonDataConverter
 import io.lenses.streamreactor.connect.cloud.common.stream.CloudOutputStream
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
+import org.apache.commons.compress.compressors.gzip.GzipParameters
 import org.apache.kafka.connect.json.JsonConverter
 import org.apache.kafka.connect.json.DecimalFormat
 import org.apache.kafka.connect.json.JsonConverterConfig
+
 import scala.jdk.CollectionConverters.MapHasAsJava
 import scala.util.Try
-class JsonFormatWriter(outputStream: CloudOutputStream) extends FormatWriter {
 
-  override def write(messageDetail: MessageDetail): Either[Throwable, Unit] = {
-    val topic         = messageDetail.topic
-    val valueSinkData = messageDetail.value
-    Try {
+class JsonFormatWriter(outputStream: CloudOutputStream)(implicit compressionCodec: CompressionCodec)
+    extends FormatWriter {
+  private var gzipOutputStream: GzipCompressorOutputStream = _
 
-      val dataBytes = messageDetail.value match {
-        case data: PrimitiveSinkData =>
-          Converter.fromConnectData(topic.value, valueSinkData.schema().orNull, data.safeValue)
-        case StructSinkData(structVal) =>
-          Converter.fromConnectData(topic.value, valueSinkData.schema().orNull, structVal)
-        case MapSinkData(map, schema) =>
-          Converter.fromConnectData(topic.value, schema.orNull, map)
-        case ArraySinkData(array, schema) =>
-          Converter.fromConnectData(topic.value, schema.orNull, array)
-        case ByteArraySinkData(_, _) => throw new IllegalStateException("Cannot currently write byte array as json")
-        case NullSinkData(schema)    => Converter.fromConnectData(topic.value, schema.orNull, null)
-      }
-
-      outputStream.write(dataBytes)
-      outputStream.write(LineSeparatorBytes)
-      outputStream.flush()
-    }.toEither
+  private val jsonCompressionCodec: CompressionCodec = {
+    compressionCodec match {
+      case CompressionCodec(UNCOMPRESSED, _) => CompressionCodecName.UNCOMPRESSED.toCodec()
+      case CompressionCodec(GZIP, _)         => CompressionCodecName.GZIP.withLevel(compressionCodec.level.getOrElse(6))
+      case _                                 => throw new IllegalArgumentException("Invalid or missing `compressionCodec` specified.")
+    }
   }
+
+  override def write(messageDetail: MessageDetail): Either[Throwable, Unit] =
+    Try {
+      val dataBytes: Array[Byte] = ToJsonDataConverter.convertMessageValueToByteArray(
+        Converter,
+        messageDetail.topic,
+        messageDetail.value,
+      )
+
+      if (jsonCompressionCodec.compressionCodec == CompressionCodecName.GZIP) {
+        if (gzipOutputStream == null) {
+          val parameters = new GzipParameters()
+
+          // `get` is safe due to `getOrElse(6)` default in case assignment.
+          parameters.setCompressionLevel(jsonCompressionCodec.level.get)
+
+          gzipOutputStream = new GzipCompressorOutputStream(outputStream, parameters)
+        }
+
+        gzipOutputStream.write(dataBytes)
+        gzipOutputStream.flush()
+      } else {
+        outputStream.write(dataBytes)
+        outputStream.write(LineSeparatorBytes)
+        outputStream.flush()
+      }
+    }.toEither
 
   override def rolloverFileOnSchemaChange(): Boolean = false
 
   override def complete(): Either[SinkError, Unit] =
-    for {
-      closed <- outputStream.complete()
-      _      <- Suppress(outputStream.flush())
-      _      <- Suppress(outputStream.close())
-    } yield closed
+    if (gzipOutputStream != null)
+      for {
+        _      <- Suppress(gzipOutputStream.flush())
+        _      <- Suppress(gzipOutputStream.close())
+        closed <- outputStream.complete()
+      } yield closed
+    else
+      for {
+        _      <- Suppress(outputStream.flush())
+        _      <- Suppress(outputStream.close())
+        closed <- outputStream.complete()
+      } yield closed
 
   override def getPointer: Long = outputStream.getPointer
 

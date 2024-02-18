@@ -25,7 +25,7 @@ trait CompressionCodecConfigKeys extends WithConnectorPrefix {
 
   def COMPRESSION_CODEC = s"$connectorPrefix.compression.codec"
 
-  val COMPRESSION_CODEC_DOC = "Compression codec to use for Avro or Parquet."
+  val COMPRESSION_CODEC_DOC = "Compression codec to use for Avro, Parquet or JSON."
   val COMPRESSION_CODEC_DEFAULT: String = UNCOMPRESSED.entryName
 
   def COMPRESSION_LEVEL = s"$connectorPrefix.compression.level"

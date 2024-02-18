@@ -43,6 +43,7 @@ import io.lenses.streamreactor.connect.config.kcqlprops.KcqlPropsSchema
 
 import java.io.InputStream
 import java.time.Instant
+import java.util.zip.ZipException
 import scala.jdk.CollectionConverters.MapHasAsScala
 
 case class ObjectMetadata(size: Long, lastModified: Instant)
@@ -111,10 +112,28 @@ case object FormatSelection {
 }
 
 case object JsonFormatSelection extends FormatSelection {
+  override def availableCompressionCodecs: Map[CompressionCodecName, Boolean] = Map(
+    UNCOMPRESSED -> true,
+    GZIP         -> true,
+  )
+
   override def toStreamReader(
     input: ReaderBuilderContext,
   ): CloudStreamReader = {
-    val inner = new TextStreamReader(input.stream)
+    // Two methods to branch here:
+    //   1. (Ideal/faster) Read the first two bytes of the input stream and check against GZIP MAGIC bytes.
+    //   2. (Current) Create new GZIP input stream and catch exception for uncompressed streams.
+    val inner =
+      try {
+        new GzipStreamReader(input.stream)
+      } catch {
+        case _: ZipException => {
+          println("Reading uncompressed source")
+
+          new TextStreamReader(input.stream)
+        }
+      }
+
     val converter = if (input.hasEnvelope) {
       new SchemalessEnvelopeConverter(input.watermarkPartition,
                                       input.targetTopic,
